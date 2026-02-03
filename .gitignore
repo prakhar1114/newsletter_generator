@@ -12,3 +12,7 @@ wheels/
 data/
 .vscode/
 
+qdrant_storage/
+.lock
+
+.env

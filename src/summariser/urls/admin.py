@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import secrets
 from typing import Any
 
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import HTMLResponse
+
+from summariser.ingest import ingest_url, ingest_all_from_urls_path
 
 admin_router = APIRouter(tags=["admin"])
 
@@ -110,17 +114,32 @@ async def admin_page() -> HTMLResponse:
 
 
 @admin_router.post("/generate_report")
-async def generate_report(file: UploadFile | None = File(default=None)) -> dict[str, Any]:
+async def generate_report(
+    file: UploadFile | None = File(default=None),
+) -> dict[str, Any]:
     """
     Dummy endpoint: accepts an optional uploaded JSONL file.
     """
     filename = file.filename if file else None
-    return {"ok": True, "message": "Dummy report generation triggered.", "filename": filename}
+
+    task_id = secrets.token_hex(8)
+
+    # Run truly in the background. (FastAPI BackgroundTasks is sync-oriented;
+    # passing an async fn there won't be awaited.)
+    asyncio.create_task(ingest_all_from_urls_path(workers=4, limit=10))
+
+    return {
+        "ok": True,
+        "message": "Report generation started in background.",
+        "task_id": task_id,
+        "filename": filename,
+    }
 
 
-def _dummy_add_sources(urls: list[str]) -> None:
+async def _add_sources(urls: list[str]) -> None:
     # Placeholder for real persistence / ingestion later.
-    _ = urls
+    for url in urls:
+        await ingest_url(url)
 
 
 @admin_router.post("/add_sources")
@@ -130,6 +149,5 @@ async def add_sources(payload: dict[str, Any]) -> dict[str, Any]:
     """
     raw = str(payload.get("urls", "")).strip()
     urls = [u.strip() for u in raw.split(",") if u.strip()]
-    _dummy_add_sources(urls)
+    await _add_sources(urls)
     return {"ok": True, "added_count": len(urls), "urls": urls}
-
