@@ -21,4 +21,5 @@ TODO:
 - batch embeddings for performance
 - verify markdowns from urls - crawl4ai
 - umap and hdbscan vs dbscan- curse of dimensionality at scale
-- 
+- define data richness and disqualify low quality articles (to alwys have good summaries)+ club multiple articles if the token count is less for more details
+- break it down into multiple articles

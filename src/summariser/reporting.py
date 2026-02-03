@@ -13,7 +13,13 @@ from openai import OpenAI
 
 from summariser.config import COLLECTION_NAME, REPORTS_PATH
 from summariser.utils import fetch_markdown_from_id
-from summariser.vectordb_client import client, init_vector_db
+from summariser.vectordb_client import (
+    centroid_points,
+    client,
+    init_vector_db,
+    scroll_points,
+    set_payload_for_points,
+ )
 
 logger = logging.getLogger(__name__)
 
@@ -31,35 +37,71 @@ class ClusterCentroid:
     url: str
 
 
-def _scroll_all_points(
+def _scroll_all_points_with_ids(
     *,
     collection_name: str,
     limit: int = 1000,
-) -> tuple[np.ndarray, list[dict[str, Any]]]:
+) -> tuple[list[str], np.ndarray, list[dict[str, Any]]]:
     """
     Fetch points from Qdrant Local using a single scroll().
 
     Returns:
+      - ids: list[str] of length N
       - vectors: (N, 384) float32 array
       - payloads: list of payload dicts (must contain url + file_id)
     """
-    init_vector_db()
-
     # For now we intentionally do a single scroll call (like the notebook),
     # which avoids offset/loop edge-cases in local mode.
-    points, _next_page_offset = client.scroll(
+    points = scroll_points(
         collection_name=collection_name,
+        limit=limit,
         with_vectors=True,
         with_payload=True,
-        limit=limit,
     )
 
     if not points:
-        return np.empty((0, 0), dtype=np.float32), []
+        return [], np.empty((0, 0), dtype=np.float32), []
 
+    ids = [str(p.id) for p in points]
     vectors = np.stack([np.asarray(p.vector, dtype=np.float32) for p in points], axis=0)
     payloads: list[dict[str, Any]] = [p.payload or {} for p in points]
-    return vectors, payloads
+    return ids, vectors, payloads
+
+
+def _persist_cluster_metadata(
+    *,
+    point_ids: list[str],
+    labels: np.ndarray,
+    centroids: list[ClusterCentroid],
+    collection_name: str,
+) -> None:
+    """
+    Persist `cluster_id` and `is_centroid` into Qdrant payloads.
+    """
+    if labels.shape[0] != len(point_ids):
+        raise ValueError("labels length must match point_ids length")
+
+    logger.info("[report] persisting cluster metadata to Qdrant ...")
+
+    # Set cluster_id for each label group.
+    unique_labels = sorted(set(int(x) for x in labels.tolist()))
+    for lab in unique_labels:
+        idxs = np.where(labels == lab)[0]
+        if idxs.size == 0:
+            continue
+        ids = [point_ids[int(i)] for i in idxs.tolist()]
+        set_payload_for_points(ids, {"cluster_id": int(lab)}, collection_name=collection_name)
+
+    # Reset all centroid flags, then set centroid points to true.
+    set_payload_for_points(point_ids, {"is_centroid": False}, collection_name=collection_name)
+    centroid_point_ids = [point_ids[c.index] for c in centroids if 0 <= c.index < len(point_ids)]
+    if centroid_point_ids:
+        set_payload_for_points(centroid_point_ids, {"is_centroid": True}, collection_name=collection_name)
+    logger.info(
+        "[report] persisted cluster_id for %s labels, is_centroid=true for %s points",
+        len(unique_labels),
+        len(centroid_point_ids),
+    )
 
 
 def _cluster_labels(
@@ -163,6 +205,7 @@ def generate_compiled_report(
     collection_name: str = COLLECTION_NAME,
     limit: int = 1000,
     openai_client: OpenAI | None = None,
+    use_stored_centroids: bool = False,
 ) -> tuple[str, Path]:
     """
     Generates a single compiled markdown report and writes it to:
@@ -170,21 +213,44 @@ def generate_compiled_report(
 
     Uses only the centroid article per cluster as context.
     """
-    logger.info("[report] loading points from collection=%r ...", collection_name)
-    vectors, payloads = _scroll_all_points(
-        collection_name=collection_name,
-        limit=limit,
-    )
-    if vectors.size == 0:
-        raise RuntimeError("No vectors found in Qdrant collection")
-    logger.info("[report] loaded %s vectors", vectors.shape[0])
+    if use_stored_centroids:
+        logger.info("[report] loading stored centroid points from collection=%r ...", collection_name)
+        points = centroid_points(collection_name=collection_name, limit=limit, with_vectors=False, with_payload=True)
+        centroids: list[ClusterCentroid] = []
+        for p in points:
+            payload = p.payload or {}
+            file_id = str(payload.get("file_id", "")).strip()
+            url = str(payload.get("url", "")).strip()
+            cluster_id = int(payload.get("cluster_id", -1))
+            if not file_id:
+                continue
+            centroids.append(ClusterCentroid(cluster_id=cluster_id, index=-1, file_id=file_id, url=url))
+        if not centroids:
+            raise RuntimeError("No stored centroids found (is_centroid=true)")
+        logger.info("[report] centroids_loaded=%s", len(centroids))
+    else:
+        logger.info("[report] loading points from collection=%r ...", collection_name)
+        point_ids, vectors, payloads = _scroll_all_points_with_ids(
+            collection_name=collection_name,
+            limit=limit,
+        )
+        if vectors.size == 0:
+            raise RuntimeError("No vectors found in Qdrant collection")
+        logger.info("[report] loaded %s vectors", vectors.shape[0])
 
-    logger.info("[report] clustering (UMAP → HDBSCAN) ...")
-    labels = _cluster_labels(vectors)
-    centroids = _pick_centroid_article_per_cluster(vectors, payloads, labels)
-    if not centroids:
-        raise RuntimeError("No clusters found (all noise or insufficient points)")
-    logger.info("[report] clusters=%s (centroid articles selected)", len(centroids))
+        logger.info("[report] clustering (UMAP → HDBSCAN) ...")
+        labels = _cluster_labels(vectors)
+        centroids = _pick_centroid_article_per_cluster(vectors, payloads, labels)
+        if not centroids:
+            raise RuntimeError("No clusters found (all noise or insufficient points)")
+        logger.info("[report] clusters=%s (centroid articles selected)", len(centroids))
+
+        _persist_cluster_metadata(
+            point_ids=point_ids,
+            labels=labels,
+            centroids=centroids,
+            collection_name=collection_name,
+        )
 
     logger.info("[report] loading centroid markdown from disk ...")
     context_blocks = _build_centroid_context(centroids)

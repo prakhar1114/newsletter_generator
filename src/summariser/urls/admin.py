@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 from typing import Any
 
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import HTMLResponse
 
-from summariser.ingest import ingest_url, ingest_all_from_urls_path
+from summariser.incremental import incremental_update_and_generate_report
+from summariser.ingest import ingest_all_from_urls_path
+
+logger = logging.getLogger(__name__)
 
 admin_router = APIRouter(tags=["admin"])
 
@@ -136,10 +140,22 @@ async def generate_report(
     }
 
 
-async def _add_sources(urls: list[str]) -> None:
-    # Placeholder for real persistence / ingestion later.
-    for url in urls:
-        await ingest_url(url)
+async def _add_sources(urls: list[str]) -> dict[str, Any]:
+    """
+    Ingest URLs, incrementally update centroids, and generate a new report.
+    """
+    res = await incremental_update_and_generate_report(urls=urls)
+    if res.report_path:
+        logger.info("[admin] incremental report written: %s", res.report_path)
+    else:
+        logger.info("[admin] no centroid changes; report not regenerated")
+    return {
+        "ok": True,
+        "ingested_count": len(res.ingested),
+        "noise_count": len(res.noise_point_ids),
+        "touched_clusters": res.touched_clusters,
+        "report_path": res.report_path,
+    }
 
 
 @admin_router.post("/add_sources")
@@ -149,5 +165,7 @@ async def add_sources(payload: dict[str, Any]) -> dict[str, Any]:
     """
     raw = str(payload.get("urls", "")).strip()
     urls = [u.strip() for u in raw.split(",") if u.strip()]
-    await _add_sources(urls)
-    return {"ok": True, "added_count": len(urls), "urls": urls}
+    result = await _add_sources(urls)
+    result["requested_count"] = len(urls)
+    result["urls"] = urls
+    return result

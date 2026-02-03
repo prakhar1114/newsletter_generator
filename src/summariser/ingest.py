@@ -19,6 +19,7 @@ from summariser.vectordb_client import delete_from_db, init_vector_db, save_to_d
 class IngestResult:
     url: str
     file_id: str
+    point_id: str
     markdown_path: str
     markdown_bytes: int
     embedded: bool
@@ -138,13 +139,19 @@ async def atomic_commit(
     file_id: str,
     markdown_temp_path: Path,
     embedding: list[float],
-) -> Path:
+) -> tuple[Path, str]:
     """
     Best-effort atomic commit between filesystem markdown persistence and Qdrant upsert.
     """
     markdown_dir = markdown_temp_path.parent
     final_path = _final_markdown_path(markdown_dir, file_id)
-    payload = {"url": url, "file_id": file_id}
+    payload = {
+        "url": url,
+        "file_id": file_id,
+        # Incremental/reporting metadata defaults:
+        "cluster_id": -1,
+        "is_centroid": False,
+    }
     # Qdrant Local expects int or UUID-like ids. We generate a UUID id and keep
     # the human-friendly `file_id` in the payload + markdown filename.
     point_id = uuid.uuid4().hex
@@ -170,7 +177,7 @@ async def atomic_commit(
             markdown_temp_path.unlink(missing_ok=True)
         raise
 
-    return final_path
+    return final_path, point_id
 
 
 async def ingest_url(
@@ -229,7 +236,7 @@ async def ingest_url(
             timings["embed_ms"] = (time.perf_counter() - t_embed0) * 1000.0
 
             t_commit0 = time.perf_counter()
-            final_path = await atomic_commit(
+            final_path, point_id = await atomic_commit(
                 url=url,
                 file_id=file_id,
                 markdown_temp_path=temp_path,
@@ -246,6 +253,7 @@ async def ingest_url(
         return IngestResult(
             url=url,
             file_id=file_id,
+            point_id=point_id,
             markdown_path=str(final_path),
             markdown_bytes=final_path.stat().st_size,
             embedded=True,

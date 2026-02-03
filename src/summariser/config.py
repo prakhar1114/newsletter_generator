@@ -13,3 +13,6 @@ REPORTS_PATH = Path("/Users/prakharjain/code/summariser/data/reports")
 COLLECTION_NAME = "article_embeddings_500"
 URLS_PATH = Path("/Users/prakharjain/code/summariser/data/articles-500.jsonl")
 MARKDOWN_PATH = Path("/Users/prakharjain/code/summariser/data/markdown-500")
+
+# Incremental clustering/reporting knobs
+CENTROID_ASSIGN_MIN_COSINE = float(os.getenv("CENTROID_ASSIGN_MIN_COSINE", "0.45"))
