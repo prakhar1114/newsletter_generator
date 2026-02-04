@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse
 from summariser.config import REPORTS_PATH
 from summariser.vectordb_client import init_vector_db
 from summariser.urls.admin import admin_router # We will create this next
+from summariser.urls.chat import chat_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -44,6 +45,7 @@ def create_app() -> FastAPI:
 
     # Include different URL groups (Routers)
     app.include_router(admin_router, prefix="/admin")
+    app.include_router(chat_router)
 
     @app.get("/", response_class=HTMLResponse)
     async def root_page() -> HTMLResponse:

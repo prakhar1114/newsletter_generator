@@ -10,7 +10,8 @@ DB_PATH = "/Users/prakharjain/code/summariser/qdrant_storage"
 REPORTS_PATH = Path("/Users/prakharjain/code/summariser/data/reports")
 
 
-COLLECTION_NAME = "article_embeddings_500"
+# COLLECTION_NAME = "article_embeddings_500"
+COLLECTION_NAME = "article_embeddings_500_2"
 URLS_PATH = Path("/Users/prakharjain/code/summariser/data/articles-500.jsonl")
 MARKDOWN_PATH = Path("/Users/prakharjain/code/summariser/data/markdown-500")
 

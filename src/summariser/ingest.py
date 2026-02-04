@@ -82,25 +82,70 @@ def write_markdown_temp(markdown_dir: Path, file_id: str, markdown: str) -> Path
 
 
 async def crawl_to_markdown(crawler: AsyncWebCrawler, url: str) -> str:
+    """
+    Crawl `url` and return markdown suitable for embedding.
+
+    Uses Crawl4AI v0.8+ "fit markdown" with a pruning content filter when available
+    (reduces boilerplate/nav/link-farms). Falls back to default crawling behavior
+    if the relevant Crawl4AI classes aren't importable for any reason.
+    """
+
+    # Build an optional Crawl4AI config to generate fit markdown (v0.8+).
+    config = None
+    try:
+        from crawl4ai import CrawlerRunConfig  # type: ignore
+        from crawl4ai.content_filter_strategy import PruningContentFilter  # type: ignore
+        from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator  # type: ignore
+
+        prune_filter = PruningContentFilter(
+            # Lower -> more content retained; higher -> more aggressively pruned
+            threshold=0.7,
+            threshold_type="dynamic",
+            min_word_threshold=10,
+        )
+        md_generator = DefaultMarkdownGenerator(content_filter=prune_filter)
+        config = CrawlerRunConfig(markdown_generator=md_generator)
+    except Exception:
+        config = None
+
     # Crawl can hang on some sites (bot checks, long loads). Apply a timeout so we can skip.
     try:
-        result = await asyncio.wait_for(crawler.arun(url=url), timeout=45.0)
+        if config is None:
+            result = await asyncio.wait_for(crawler.arun(url=url), timeout=45.0)
+            print(result)
+        else:
+            result = await asyncio.wait_for(crawler.arun(url=url, config=config), timeout=45.0)
     except TimeoutError as e:
         raise IngestError(f"Crawl timed out after 45s for url={url}") from e
+
+    # Crawl4AI can return an explicit error/success marker on some versions.
+    success = getattr(result, "success", None)
+    if success is False:
+        msg = str(getattr(result, "error_message", "") or "Crawl4AI crawl failed")
+        raise IngestError(msg)
+
     # Crawl4AI returns markdown in different shapes across versions; handle common cases.
     md = getattr(result, "markdown", None)
     if md is None:
         raise IngestError("Crawl4AI result has no markdown")
+
+    # Older versions / some configs return markdown directly as a string.
     if isinstance(md, str):
+        if not md.strip():
+            raise IngestError("Crawl4AI markdown is empty")
         return md
-    # v0.8+: markdown can be a MarkdownGenerationResult with raw_markdown/fit_markdown
-    raw = getattr(md, "raw_markdown", None)
-    if isinstance(raw, str) and raw.strip():
-        return raw
+
+    # v0.8+: markdown can be a MarkdownGenerationResult with raw_markdown/fit_markdown.
+    # Prefer fit output first; fall back to raw.
     fit = getattr(md, "fit_markdown", None)
     if isinstance(fit, str) and fit.strip():
         return fit
-    # Fallback to string conversion
+
+    raw = getattr(md, "raw_markdown", None)
+    if isinstance(raw, str) and raw.strip():
+        return raw
+
+    # Fallback to string conversion (last resort).
     text = str(md)
     if not text.strip():
         raise IngestError("Crawl4AI markdown is empty")
